@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Conversation Manager",
+    "description": "Manage conversations from the sidebar: see each conversation's file count and total memory, open or reveal generated files, open the workspace folder, delete files, and permanently remove a conversation with its local session log."
+  }
+}

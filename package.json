@@ -1,0 +1,33 @@
+{
+  "name": "@local/conversation-manager",
+  "version": "0.3.1",
+  "private": true,
+  "type": "module",
+  "description": "Conversation management for the sidebar: total memory and file count, open/reveal/delete generated files, open the conversation workspace folder, and permanently delete conversations with their local session logs.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}
