@@ -1,11 +1,11 @@
 window.__ModuleLoader__.load({
-  id: '@local/conversation-manager',
+  id: 'dsh-conversation-cleaner',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
-    const NS = 'conversation-manager'
-    const PREFIX = '/.dsh-conversation-manager'
+    const NS = 'conversation-cleaner'
+    const PREFIX = '/.dsh-conversation-cleaner'
 
     const DICT = {
       en: {
@@ -866,7 +866,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      ctx.effect(() => ctx.locale.register(NS, DICT), 'conversation-manager: dictionaries')
+      ctx.effect(() => ctx.locale.register(NS, DICT), 'conversation-cleaner: dictionaries')
 
       ctx.effect(() => {
         void refresh()
@@ -875,13 +875,13 @@ window.__ModuleLoader__.load({
         }
         window.addEventListener('focus', onFocus)
         return () => window.removeEventListener('focus', onFocus)
-      }, 'conversation-manager: summaries')
+      }, 'conversation-cleaner: summaries')
 
       ctx.slots.inject('sidebar.workspaces.session.menu.item', () =>
         ctx.slots.register(
           {
             name: 'sidebar.workspaces.session.menu.item',
-            id: 'conversation-manager-files',
+            id: 'conversation-cleaner-files',
             order: 350,
             locale: NS,
           },
@@ -893,7 +893,7 @@ window.__ModuleLoader__.load({
         ctx.slots.register(
           {
             name: 'sidebar.workspaces.session.menu.item',
-            id: 'conversation-manager-delete',
+            id: 'conversation-cleaner-delete',
             order: 500,
             locale: NS,
           },
@@ -905,7 +905,7 @@ window.__ModuleLoader__.load({
         ctx.slots.register(
           {
             name: 'shell.overlay',
-            id: 'conversation-manager-dialog',
+            id: 'conversation-cleaner-dialog',
             locale: NS,
           },
           StorageDialog,
@@ -918,7 +918,7 @@ window.__ModuleLoader__.load({
         element.textContent = styles
         document.head.appendChild(element)
         return () => element.remove()
-      }, 'conversation-manager: styles')
+      }, 'conversation-cleaner: styles')
     }
 
     return {

@@ -11,7 +11,7 @@
  * (the persistence seam has no deletion API), and removes the generated files
  * that the conversation itself declared or wrote.
  *
- * @module @local/conversation-manager
+ * @module dsh-conversation-cleaner
  */
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
@@ -19,7 +19,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { fileURLToPath } from 'node:url'
 import { serialize } from 'node:v8'
 
-export const name = 'conversation-manager'
+export const name = 'dsh-conversation-cleaner'
 
 /** Services this bundle reads; a profile without one leaves it inactive. */
 export const inject = [
@@ -33,7 +33,7 @@ export const inject = [
   'webServer',
 ]
 
-const ROUTE_PREFIX = '/.dsh-conversation-manager'
+const ROUTE_PREFIX = '/.dsh-conversation-cleaner'
 const ROUTE_OVERVIEW = `${ROUTE_PREFIX}/overview`
 const ROUTE_OPEN_FILE = `${ROUTE_PREFIX}/open-file`
 const ROUTE_OPEN_WORKSPACE = `${ROUTE_PREFIX}/open-workspace`
