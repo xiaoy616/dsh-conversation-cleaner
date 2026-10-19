@@ -1,4 +1,4 @@
-# conversation-manager
+# dsh-conversation-cleaner
 
 A DeepSeek Harness sidebar plugin for managing conversations and their generated files.
 
