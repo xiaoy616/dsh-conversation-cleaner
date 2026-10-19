@@ -11,13 +11,19 @@ A DeepSeek Harness sidebar plugin for managing conversations and their generated
 
 ## Install
 
-This package is a local DSH plugin (`private: true`), loaded from the plugin directory:
+From npm:
 
 ```bash
-plugins/conversation-manager/
+dsh plugin add dsh-conversation-cleaner
 ```
 
-It is declared through `cordis.patch.yml` and exposes both a host entry (`index.js`) and a web client entry (`client.js`).
+Or from a local checkout:
+
+```bash
+dsh plugin add /path/to/dsh-conversation-cleaner
+```
+
+The plugin is declared through `cordis.patch.yml` and exposes both a host entry (`index.js`) and a web client entry (`client.js`).
 
 ## Package layout
 
