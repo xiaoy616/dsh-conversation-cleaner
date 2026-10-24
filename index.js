@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { serialize } from 'node:v8'
+import { zstdDecompressSync } from 'node:zlib'
 
 export const name = 'dsh-conversation-cleaner'
 
@@ -40,6 +41,7 @@ const ROUTE_OPEN_WORKSPACE = `${ROUTE_PREFIX}/open-workspace`
 const ROUTE_DELETE_FILE = `${ROUTE_PREFIX}/delete-file`
 const ROUTE_DELETE_FILES = `${ROUTE_PREFIX}/delete-files`
 const ROUTE_DELETE_SESSION = `${ROUTE_PREFIX}/delete-session`
+const ROUTE_SWEEP = `${ROUTE_PREFIX}/sweep`
 const MAX_BODY_BYTES = 64 * 1024
 const MAX_SESSIONS = 200
 /** A conversation must never delete the plugin that is serving its panel. */
@@ -900,6 +902,176 @@ async function removePersistedState(root, sessionId) {
   return directory !== undefined
 }
 
+/**
+ * Parse one session log header: the parent link, the origin, and the log size.
+ *
+ * A session log is a series of concatenated zstd frames, one per append, so the
+ * first frame is the only part that can be decoded on its own. That is enough:
+ * the header lives there. Emptiness is decided from the projection cache, never
+ * from frame counts.
+ */
+async function sessionHeader(directory) {
+  if (!directory) return undefined
+  const file = join(directory, 'session.v4.jsonl.zstd')
+  let info
+  try {
+    info = await fs.stat(file)
+  } catch {
+    return undefined
+  }
+  const fallback = { parent: null, origin: 'user', createdAt: undefined, size: info.size }
+  if (typeof zstdDecompressSync !== 'function') return fallback
+  let header
+  try {
+    const text = zstdDecompressSync(await fs.readFile(file)).toString('utf8')
+    header = text.split('\n').find((line) => line.trim().length > 0)
+  } catch {
+    return fallback
+  }
+  if (header === undefined) return fallback
+  let parsed
+  try {
+    parsed = JSON.parse(header)
+  } catch {
+    return fallback
+  }
+  return {
+    parent: typeof parsed.parentSession === 'string' ? parsed.parentSession : null,
+    origin: typeof parsed.origin === 'string' ? parsed.origin : 'user',
+    createdAt: typeof parsed.createdAt === 'number' ? parsed.createdAt : undefined,
+    size: info.size,
+  }
+}
+
+/** How many messages the projection cache attributes to a session, or `undefined`. */
+async function projectedMessageCount(sessionId) {
+  const file = join(dshHome(), 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
+  try {
+    const record = JSON.parse(await fs.readFile(file, 'utf8'))
+    const count = record?.record?.rows?.titleInput?.val?.count
+    return typeof count === 'number' ? count : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Header metadata for every persisted session directory under `root`. */
+async function sessionHeaderIndex(root) {
+  const index = await sessionDirectoryIndex(root)
+  const headers = new Map()
+  await mapLimit([...index.entries()], 4, async ([id, directory]) => {
+    headers.set(id, await sessionHeader(directory))
+  })
+  return headers
+}
+
+/** Every descendant of `sessionId` through parent links, ancestors before children. */
+function descendantsOf(headers, sessionId) {
+  const children = new Map()
+  for (const [id, header] of headers) {
+    const parent = header?.parent
+    if (typeof parent !== 'string' || parent.length === 0) continue
+    const bucket = children.get(parent)
+    if (bucket === undefined) children.set(parent, [id])
+    else bucket.push(id)
+  }
+  const ordered = []
+  const seen = new Set([sessionId])
+  let frontier = [sessionId]
+  while (frontier.length > 0) {
+    const next = []
+    for (const current of frontier) {
+      for (const child of children.get(current) ?? []) {
+        if (seen.has(child)) continue
+        seen.add(child)
+        next.push(child)
+        ordered.push(child)
+      }
+    }
+    frontier = next
+  }
+  return ordered
+}
+
+/** Delete one session's resident state, registry edges, log, and checkpoint. */
+async function deleteSessionState(ctx, root, sessionId) {
+  const warnings = []
+  const live = await disposeResidentSession(ctx, sessionId)
+  if (!live.agentDetached) warnings.push('agent detach failed')
+  if (!live.sessionDetached) warnings.push('session detach failed')
+  for (const failure of live.failures) warnings.push(failure)
+  for (const warning of await detachFromWorkspaces(ctx, sessionId)) warnings.push(warning)
+  const logDeleted = await removePersistedState(root, sessionId)
+  tombstones.add(sessionId)
+  return { sessionId, logDeleted, warnings }
+}
+
+/** Remove project directories that no longer hold any session. */
+async function pruneEmptyProjectDirectories(root) {
+  let entries
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('--')) continue
+    const directory = join(root, entry.name)
+    try {
+      const children = await fs.readdir(directory)
+      if (children.every((name) => name === '.DS_Store')) {
+        await fs.rm(directory, { recursive: true, force: true })
+        removed += 1
+      }
+    } catch {
+      // Another process may be writing there; leave it for the next sweep.
+    }
+  }
+  return removed
+}
+
+/**
+ * Remove storage no conversation row can ever show: descendant sessions whose
+ * parent is already gone, and header-only shells with a tiny log that the
+ * projection cache reports as message-less. Live sessions, fresh shells, and
+ * anything without a trustworthy signal are left alone.
+ */
+async function sweepHiddenSessions(ctx, root, options = {}) {
+  const minAgeMs = Number.isFinite(options.minAgeMs) ? options.minAgeMs : 10 * 60 * 1000
+  const headers = await sessionHeaderIndex(root)
+  const present = new Set(headers.keys())
+  const now = Date.now()
+  const isLive = (id) => ctx.sessions.get(id) !== undefined || ctx.agents.get(id) !== undefined
+  const targets = []
+  for (const [id, header] of headers) {
+    if (header === undefined || isLive(id)) continue
+    const parentGone =
+      typeof header.parent === 'string' && header.parent.length > 0 && !present.has(header.parent)
+    if (parentGone) {
+      targets.push(id)
+      continue
+    }
+    if (header.size > 8192) continue
+    if (header.createdAt !== undefined && now - header.createdAt < minAgeMs) continue
+    const count = await projectedMessageCount(id)
+    if (count === 0) targets.push(id)
+  }
+  const removed = []
+  const warnings = []
+  for (const id of targets) {
+    try {
+      removed.push(id)
+      const result = await deleteSessionState(ctx, root, id)
+      for (const warning of result.warnings) warnings.push(`${id}: ${warning}`)
+    } catch (cause) {
+      warnings.push(`${id}: ${errorText(cause)}`)
+    }
+  }
+  const prunedDirectories = await pruneEmptyProjectDirectories(root)
+  return { removed, removedCount: removed.length, prunedDirectories, warnings }
+}
+
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config = {}) {
   const root = resolve(
@@ -911,6 +1083,16 @@ export function apply(ctx, config = {}) {
     typeof config.defaultWorkspace === 'string' && config.defaultWorkspace.length > 0
       ? resolve(config.defaultWorkspace)
       : undefined
+
+  // Reclaim space that no sidebar row can show: orphaned subagent logs and
+  // header-only shells. Deferred so boot is never blocked by directory walks.
+  ctx.effect(() => {
+    const timer = setTimeout(() => {
+      void sweepHiddenSessions(ctx, root).catch(() => {})
+    }, 60_000)
+    timer.unref?.()
+    return () => clearTimeout(timer)
+  })
 
   ctx.effect(() =>
     ctx.webServer.register({
@@ -995,12 +1177,29 @@ export function apply(ctx, config = {}) {
               failures: results.filter((result) => result.error !== undefined).length,
             })
           }
+          if (route === ROUTE_SWEEP && req.method === 'POST') {
+            const body = await readJson(req).catch(() => ({}))
+            const minAgeMs = Number.isFinite(body.minAgeMs) ? body.minAgeMs : undefined
+            return sendJson(res, 200, await sweepHiddenSessions(ctx, root, { minAgeMs }))
+          }
           if (route === ROUTE_DELETE_SESSION && req.method === 'POST') {
             const body = await readJson(req)
             const sessionId = String(body.sessionId ?? '')
             const summary = await findSummary(ctx, sessionId)
             if (summary.running) throw httpError(409, 'Stop this conversation before deleting it.')
             const files = await trackedFiles(ctx, summary)
+            // A conversation owns the sessions it delegated to: remove the
+            // deepest descendants first so no orphan log outlives its parent.
+            const descendantReports = []
+            const descendantIds = descendantsOf(await sessionHeaderIndex(root), sessionId).reverse()
+            for (const descendant of descendantIds) {
+              try {
+                const report = await deleteSessionState(ctx, root, descendant)
+                descendantReports.push(report)
+              } catch (cause) {
+                descendantReports.push({ sessionId: descendant, error: errorText(cause), warnings: [] })
+              }
+            }
             const live = await disposeResidentSession(ctx, sessionId)
             if (!live.agentDetached || !live.sessionDetached) {
               throw httpError(
@@ -1026,7 +1225,18 @@ export function apply(ctx, config = {}) {
               sessionDetached: live.sessionDetached,
               filesDeleted: fileResults.filter((result) => result.deleted).length,
               fileFailures: fileResults.filter((result) => result.error !== undefined).length,
-              warnings: [...live.failures, ...workspaceWarnings],
+              descendantsDeleted: descendantReports.filter((report) => report.error === undefined).length,
+              descendants: descendantReports.map((report) => ({
+                sessionId: report.sessionId,
+                logDeleted: report.logDeleted === true,
+                error: report.error,
+              })),
+              warnings: [
+                ...live.failures,
+                ...workspaceWarnings,
+                ...descendantReports.flatMap((report) => report.warnings ?? []),
+                ...descendantReports.filter((report) => report.error !== undefined).map((report) => `${report.sessionId}: ${report.error}`),
+              ],
             })
           }
           return sendJson(res, 404, { error: 'Not found.' })
